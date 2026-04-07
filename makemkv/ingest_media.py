@@ -22,6 +22,44 @@ ENGLISH_COMMON_WORDS = {
     "say", "her", "she", "him", "his", "are", "was", "were", "what", "when", "where", "who", "why", "how",
 }
 UNKNOWN_LANGUAGE_CODES = {"und", "unknown", ""}
+DEFAULT_SKIP_HINTS = (
+    "game",
+    "retro",
+    "rom",
+    "roms",
+    "arcade",
+    "emulator",
+    "mame",
+    "3do",
+    "amiga",
+    "atari",
+    "dreamcast",
+    "saturn",
+    "sega",
+    "megacd",
+    "gamecube",
+    "nintendo",
+    "switch",
+    "wii",
+    "wiiu",
+    "nds",
+    "n64",
+    "gameboy",
+    "gba",
+    "ps1",
+    "ps2",
+    "ps3",
+    "ps4",
+    "ps5",
+    "psp",
+    "vita",
+    "xbox",
+    "xbox360",
+    "x360",
+    "xboxdvd",
+    "windows.iso",
+    "linux.iso",
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +70,23 @@ class Candidate:
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def emit_result(status: str, source_path: Path, video_path: Path, aux_path: Path | None = None) -> None:
+    aux_value = str(aux_path) if aux_path is not None else ""
+    print(
+        "\t".join(
+            [
+                "INGEST_RESULT",
+                status,
+                str(source_path),
+                str(video_path),
+                aux_value,
+                str(video_path.parent),
+            ]
+        ),
+        flush=True,
+    )
 
 
 def resolve_helper_command(*names: str) -> str:
@@ -74,8 +129,7 @@ def should_skip_iso(path: Path) -> bool:
     lowered = str(path).lower()
     if "/misc/" in lowered or "/_failed_" in lowered:
         return True
-    skip_hints = ("game", "retro", "rom", "arcade", "emulator", "mame", "xboxdvd", "windows.iso", "linux.iso")
-    return any(hint in lowered for hint in skip_hints)
+    return any(hint in lowered for hint in DEFAULT_SKIP_HINTS)
 
 
 def detect_candidate(path: Path) -> Candidate | None:
@@ -166,9 +220,19 @@ def existing_outputs(candidate: Candidate) -> list[Path]:
     expected = output_path(candidate)
     if expected.exists():
         return [expected]
+
+    search_dir: Path | None = None
     if candidate.kind == "iso":
-        parent = candidate.path.parent
-        return sorted(path for path in parent.glob("*.mkv") if path.is_file() and ".subtitlefix" not in path.name.lower())
+        search_dir = candidate.path.parent
+    elif candidate.kind == "bluray_root":
+        search_dir = candidate.path
+    elif candidate.kind == "bluray_stream":
+        search_dir = candidate.path.parent.parent
+    elif candidate.kind == "m2ts_dir":
+        search_dir = candidate.path
+
+    if search_dir is not None:
+        return sorted(path for path in search_dir.glob("*.mkv") if path.is_file() and ".subtitlefix" not in path.name.lower())
     return []
 
 
@@ -429,8 +493,10 @@ def main() -> int:
             subtitle_path = ensure_english_subtitle(video_path)
             if subtitle_path is not None:
                 log(f"Ready: {video_path} + {subtitle_path}")
+                emit_result("ready", candidate.path, video_path, subtitle_path)
             else:
                 log(f"Ready for manual subtitle review: {video_path}")
+                emit_result("review", candidate.path, video_path, review_marker_path(video_path))
         except Exception as exc:
             exit_code = 1
             log(f"Failed ingest for {candidate.path}: {exc}")

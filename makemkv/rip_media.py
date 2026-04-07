@@ -261,6 +261,7 @@ def ripdone_path(candidate: Candidate) -> Path | None:
 def legacy_title_prefixes(candidate: Candidate) -> list[str]:
     if candidate.kind != "iso":
         return []
+
     base_name = candidate.path.stem
     prefixes = [base_name]
     if base_name.lower().endswith(" dvd"):
@@ -341,20 +342,26 @@ def ffmpeg_copy(input_args: list[str], output_path_value: Path) -> None:
 def process_iso(candidate: Candidate, *, rip_min_length: int, feature_min_seconds: int) -> Path:
     source = candidate.path
     final_output = output_path(candidate)
-    with tempfile.TemporaryDirectory(prefix="makemkv-", dir=str(final_output.parent)) as temp_dir_name:
-        temp_dir = Path(temp_dir_name)
+    temp_dir = Path(tempfile.mkdtemp(prefix="makemkv-", dir=str(final_output.parent)))
+    try:
         run_command(["makemkvcon", "mkv", f"file:{source}", "all", str(temp_dir), f"--minlength={rip_min_length}"])
         generated = sorted(temp_dir.glob("*.mkv"))
         selected = pick_best_feature(generated, feature_min_seconds=feature_min_seconds)
         if final_output.exists():
             final_output.unlink()
         shutil.move(str(selected), str(final_output))
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
     log(f"Final feature MKV: {final_output}")
     return final_output
 
 
 def process_bluray(candidate: Candidate) -> Path:
-    bluray_root = candidate.path if candidate.kind == "bluray_root" else candidate.path.parent.parent
+    if candidate.kind == "bluray_root":
+        bluray_root = candidate.path
+    else:
+        bluray_root = candidate.path.parent.parent
+
     final_output = output_path(candidate)
     playlist = select_longest_bluray_playlist(bluray_root)
     ffmpeg_copy(["-playlist", playlist, "-i", f"bluray:{bluray_root}"], final_output)
@@ -365,22 +372,27 @@ def process_m2ts_directory(candidate: Candidate) -> Path:
     source_dir = candidate.path
     if candidate.kind == "bluray_stream":
         return process_bluray(candidate)
+
     segments = sorted(source_dir.glob("*.m2ts"))
     if not segments:
         raise RuntimeError(f"No M2TS files found in {source_dir}")
+
     final_output = output_path(candidate)
     if len(segments) == 1:
         ffmpeg_copy(["-i", str(segments[0])], final_output)
         return final_output
+
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
         concat_file = Path(handle.name)
         for segment in segments:
             escaped_segment = segment.as_posix().replace("'", "'\\''")
             handle.write(f"file '{escaped_segment}'\n")
+
     try:
         ffmpeg_copy(["-f", "concat", "-safe", "0", "-i", str(concat_file)], final_output)
     finally:
         concat_file.unlink(missing_ok=True)
+
     return final_output
 
 
