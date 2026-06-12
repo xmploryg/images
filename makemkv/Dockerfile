@@ -1,5 +1,6 @@
 FROM ubuntu:22.04
 
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     ca-certificates \
@@ -34,6 +35,8 @@ RUN apt-get update && apt-get install -y \
     less \
     && rm -rf /var/lib/apt/lists/*
 
+
+# Set current MakeMKV Linux release from the upstream forum thread.
 ENV MAKEMKV_VERSION=1.18.3
 ENV RIP_MIN_LENGTH=1200
 ENV FEATURE_MIN_SECONDS=2400
@@ -55,7 +58,9 @@ RUN pip3 install --no-cache-dir deep-translator ffsubsync pgsrip && \
     cd makemkv-bin-${MAKEMKV_VERSION} && \
     mkdir -p tmp && \
     echo "accepted" > tmp/eula_accepted && \
-    make -j$(nproc) && make install
+    make -j$(nproc) && make install && \
+    mkdir -p /root/.MakeMKV && \
+    echo 'app_Key = "T-BSaJ6gwgMx4eIggWkVYXiVP_6zehm7WAO9dEydvzOHFHoZ6YQ82BL5cGpYDxvyRWnS"' > /root/.MakeMKV/settings.conf
 
 COPY rip_media.py /usr/local/bin/rip-media
 COPY ingest_media.py /usr/local/bin/ingest-media

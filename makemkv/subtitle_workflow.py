@@ -28,7 +28,18 @@ def run_command(command: list[str], *, capture: bool = False) -> subprocess.Comp
 
 
 def ffprobe_streams(video_path: Path) -> list[dict]:
-    result = run_command(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(video_path)], capture=True)
+    result = run_command(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_streams",
+            "-of",
+            "json",
+            str(video_path),
+        ],
+        capture=True,
+    )
     payload = json.loads(result.stdout or "{}")
     return payload.get("streams", [])
 
@@ -36,7 +47,16 @@ def ffprobe_streams(video_path: Path) -> list[dict]:
 def normalize_language(value: str | None) -> str:
     if not value:
         return "und"
-    aliases = {"en": "eng", "english": "eng", "zh": "zho", "chi": "zho", "cn": "zho", "chinese": "zho", "ja": "jpn", "jp": "jpn"}
+    aliases = {
+        "en": "eng",
+        "english": "eng",
+        "zh": "zho",
+        "chi": "zho",
+        "cn": "zho",
+        "chinese": "zho",
+        "ja": "jpn",
+        "jp": "jpn",
+    }
     return aliases.get(value.strip().lower(), value.strip().lower())
 
 
@@ -45,7 +65,14 @@ def subtitle_streams(video_path: Path) -> list[dict]:
     for stream in ffprobe_streams(video_path):
         if stream.get("codec_type") != "subtitle":
             continue
-        tracks.append({"index": stream["index"], "codec_name": stream.get("codec_name", "unknown"), "language": normalize_language(stream.get("tags", {}).get("language")), "title": stream.get("tags", {}).get("title", "")})
+        tracks.append(
+            {
+                "index": stream["index"],
+                "codec_name": stream.get("codec_name", "unknown"),
+                "language": normalize_language(stream.get("tags", {}).get("language")),
+                "title": stream.get("tags", {}).get("title", ""),
+            }
+        )
     return tracks
 
 
@@ -78,6 +105,7 @@ def sort_tracks_by_priority(tracks: list[dict]) -> list[dict]:
             return (0, SOURCE_LANGUAGE_PRIORITY.index(track["language"]))
         except ValueError:
             return (1, track["index"])
+
     return sorted(tracks, key=score)
 
 
@@ -85,32 +113,58 @@ def resolve_tracks(video_path: Path, language: str | None, stream_index: int | N
     tracks = subtitle_streams(video_path)
     if not tracks:
         raise RuntimeError(f"No subtitle streams found in {video_path}")
+
     english = english_tracks(tracks)
     non_english = non_english_tracks(tracks)
+
     if stream_index is not None:
         return [find_track_by_index(tracks, stream_index)], english
+
     if language is not None:
         selected = find_track_by_language(tracks, language)
         if selected is None:
             raise RuntimeError(f"No subtitle stream found for language {language}")
         return [selected], english
+
     if not non_english:
         return [], english
+
     return sort_tracks_by_priority(non_english), english
 
 
 def extract_text_subtitle(video_path: Path, track: dict, output_path: Path) -> Path:
     codec_name = track["codec_name"]
     if codec_name in IMAGE_SUBTITLE_CODECS:
-        raise RuntimeError(f"Subtitle stream {track['index']} uses {codec_name}, which is image-based. OCR is required before translation.")
+        raise RuntimeError(
+            f"Subtitle stream {track['index']} uses {codec_name}, which is image-based. OCR is required before translation."
+        )
     if codec_name not in TEXT_SUBTITLE_CODECS:
         raise RuntimeError(f"Subtitle stream {track['index']} codec {codec_name} is not supported for direct translation")
-    run_command(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video_path), "-map", f"0:{track['index']}", str(output_path)])
+
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(video_path),
+            "-map",
+            f"0:{track['index']}",
+            str(output_path),
+        ]
+    )
     return output_path
 
 
 def extract_pgs_subtitle(video_path: Path, track: dict, output_path: Path) -> Path:
-    run_command(["mkvextract", "tracks", str(video_path), f"{track['index']}:{output_path}"])
+    run_command([
+        "mkvextract",
+        "tracks",
+        str(video_path),
+        f"{track['index']}:{output_path}",
+    ])
     return output_path
 
 
@@ -158,7 +212,16 @@ def translate_srt(input_path: Path, output_path: Path, *, target_language: str =
 
 
 def sync_subtitle(video_path: Path, subtitle_path: Path, output_path: Path) -> Path:
-    run_command(["ffsubsync", str(video_path), "-i", str(subtitle_path), "-o", str(output_path)])
+    run_command(
+        [
+            "ffsubsync",
+            str(video_path),
+            "-i",
+            str(subtitle_path),
+            "-o",
+            str(output_path),
+        ]
+    )
     return output_path
 
 
@@ -166,12 +229,32 @@ def mux_subtitle(video_path: Path, subtitle_path: Path, output_path: Path, *, ti
     existing_subtitle_count = sum(1 for stream in ffprobe_streams(video_path) if stream.get("codec_type") == "subtitle")
     with tempfile.NamedTemporaryFile(suffix=video_path.suffix, delete=False, dir=str(output_path.parent)) as handle:
         temp_output = Path(handle.name)
+
     try:
-        run_command([
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video_path), "-i", str(subtitle_path), "-map", "0", "-map", "1:0", "-c", "copy",
-            f"-metadata:s:s:{existing_subtitle_count}", f"language={language}",
-            f"-metadata:s:s:{existing_subtitle_count}", f"title={title}", str(temp_output),
-        ])
+        run_command(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(video_path),
+                "-i",
+                str(subtitle_path),
+                "-map",
+                "0",
+                "-map",
+                "1:0",
+                "-c",
+                "copy",
+                f"-metadata:s:s:{existing_subtitle_count}",
+                f"language={language}",
+                f"-metadata:s:s:{existing_subtitle_count}",
+                f"title={title}",
+                str(temp_output),
+            ]
+        )
         temp_output.replace(output_path)
         return output_path
     finally:
@@ -192,29 +275,50 @@ def mux_title(track: dict, *, has_english: bool) -> str:
     return f"{prefix} (translated from {track['language']})"
 
 
-def process_track(video_path: Path, track: dict, *, workdir: Path, has_english: bool, translate_provider: str, target_language: str, sync_enabled: bool, mux_enabled: bool) -> Path:
+def process_track(
+    video_path: Path,
+    track: dict,
+    *,
+    workdir: Path,
+    has_english: bool,
+    translate_provider: str,
+    target_language: str,
+    sync_enabled: bool,
+    mux_enabled: bool,
+) -> Path:
     track_prefix = workdir / f"stream-{track['index']}.{track['language']}"
     extracted_text_path = track_prefix.with_suffix(".srt")
     extracted_pgs_path = track_prefix.with_suffix(".sup")
     ocr_text_path = track_prefix.with_name(f"{track_prefix.name}.ocr.srt")
     translated_sidecar = sidecar_path(video_path, track, has_english=has_english, extension="srt")
     synced_sidecar = translated_sidecar.with_name(f"{translated_sidecar.stem}.synced{translated_sidecar.suffix}")
+
     if track["codec_name"] in IMAGE_SUBTITLE_CODECS:
         extract_pgs_subtitle(video_path, track, extracted_pgs_path)
         source_text = ocr_pgs_subtitle(extracted_pgs_path, ocr_text_path)
     else:
         source_text = extract_text_subtitle(video_path, track, extracted_text_path)
+
     if translate_provider == "google":
         translate_srt(source_text, translated_sidecar, target_language=target_language)
     else:
         shutil.copy2(source_text, translated_sidecar)
+
     final_sidecar = translated_sidecar
     if sync_enabled:
         final_sidecar = sync_subtitle(video_path, translated_sidecar, synced_sidecar)
         shutil.move(str(final_sidecar), str(translated_sidecar))
         final_sidecar = translated_sidecar
+
     if mux_enabled:
-        mux_subtitle(video_path, final_sidecar, video_path, title=mux_title(track, has_english=has_english), language=normalize_language(target_language))
+        mux_subtitle(
+            video_path,
+            final_sidecar,
+            video_path,
+            title=mux_title(track, has_english=has_english),
+            language=normalize_language(target_language),
+        )
+
     return final_sidecar
 
 
@@ -237,21 +341,34 @@ def main() -> int:
     video_path = Path(args.video).resolve()
     if not video_path.exists():
         raise FileNotFoundError(video_path)
+
     selected_tracks, english = resolve_tracks(video_path, args.subtitle_language, args.subtitle_index)
     workdir = Path(args.workdir).resolve() if args.workdir else video_path.parent / f"{video_path.stem}.subs"
     workdir.mkdir(parents=True, exist_ok=True)
+
     if not selected_tracks:
         log(f"Only English subtitles were found in {video_path}; nothing to translate or clone")
         return 0
+
     has_english = bool(english)
     exit_code = 0
     for track in selected_tracks:
         try:
-            output = process_track(video_path, track, workdir=workdir, has_english=has_english, translate_provider=args.translate_provider, target_language=args.target_language, sync_enabled=args.sync, mux_enabled=args.mux)
+            output = process_track(
+                video_path,
+                track,
+                workdir=workdir,
+                has_english=has_english,
+                translate_provider=args.translate_provider,
+                target_language=args.target_language,
+                sync_enabled=args.sync,
+                mux_enabled=args.mux,
+            )
             log(f"Prepared subtitle file: {output}")
         except Exception as exc:
             exit_code = 1
             log(f"Failed subtitle track {track['index']} ({track['language']}): {exc}")
+
     return exit_code
 
 

@@ -60,8 +60,6 @@ DEFAULT_SKIP_HINTS = (
     "windows.iso",
     "linux.iso",
 )
-
-
 @dataclass(frozen=True)
 class Candidate:
     kind: str
@@ -90,10 +88,8 @@ def emit_result(status: str, source_path: Path, video_path: Path, aux_path: Path
 
 
 def resolve_helper_command(*names: str) -> str:
-    search_paths = [Path("/usr/local/bin")]
     script_path = Path(__file__).resolve()
-    if script_path.parent not in search_paths:
-        search_paths.append(script_path.parent)
+    search_paths = [script_path.parent, Path("/usr/local/bin")]
 
     for directory in search_paths:
         for name in names:
@@ -101,6 +97,13 @@ def resolve_helper_command(*names: str) -> str:
             if candidate.exists():
                 return str(candidate)
     raise RuntimeError(f"Unable to locate helper command. Tried: {', '.join(names)}")
+
+
+def helper_command(*names: str) -> list[str]:
+    helper = resolve_helper_command(*names)
+    if helper.endswith(".py"):
+        return [sys.executable, helper]
+    return [helper]
 
 
 def run_command(command: list[str], *, capture: bool = False, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -132,6 +135,14 @@ def should_skip_iso(path: Path) -> bool:
     return any(hint in lowered for hint in DEFAULT_SKIP_HINTS)
 
 
+def is_video_ts_dir(path: Path) -> bool:
+    return path.is_dir() and path.name.upper() == "VIDEO_TS"
+
+
+def has_vob_files(path: Path) -> bool:
+    return any(child.is_file() and child.suffix.lower() == ".vob" for child in path.iterdir())
+
+
 def detect_candidate(path: Path) -> Candidate | None:
     if path.is_file():
         if path.suffix.lower() == ".iso" and not should_skip_iso(path):
@@ -139,14 +150,22 @@ def detect_candidate(path: Path) -> Candidate | None:
         if path.suffix.lower() == ".mkv":
             return Candidate("mkv", path)
         return None
+
     if not path.is_dir():
         return None
+
     if (path / "BDMV").is_dir():
         return Candidate("bluray_root", path)
+    if (path / "VIDEO_TS").is_dir():
+        return Candidate("dvd_root", path)
     if path.name == "STREAM" and path.parent.name == "BDMV":
         return Candidate("bluray_stream", path)
+    if is_video_ts_dir(path):
+        return Candidate("dvd_video_ts", path)
     if any(child.suffix.lower() == ".m2ts" for child in path.iterdir() if child.is_file()):
         return Candidate("m2ts_dir", path)
+    if has_vob_files(path):
+        return Candidate("vob_dir", path)
     return None
 
 
@@ -164,7 +183,15 @@ def discover_in_directory(path: Path, discovered: list[Candidate], seen: set[Pat
             add_candidate(discovered, seen, Candidate("bluray_root", current))
             dirs[:] = []
             continue
+        if "VIDEO_TS" in dirs:
+            add_candidate(discovered, seen, Candidate("dvd_root", current))
+            dirs[:] = []
+            continue
         if current.name == "STREAM" and current.parent.name == "BDMV":
+            dirs[:] = []
+            continue
+        if is_video_ts_dir(current):
+            add_candidate(discovered, seen, Candidate("dvd_video_ts", current))
             dirs[:] = []
             continue
         for file_name in sorted(files):
@@ -173,6 +200,10 @@ def discover_in_directory(path: Path, discovered: list[Candidate], seen: set[Pat
                 add_candidate(discovered, seen, Candidate("iso", file_path))
         if any(file_name.lower().endswith(".m2ts") for file_name in files):
             add_candidate(discovered, seen, Candidate("m2ts_dir", current))
+            dirs[:] = []
+            continue
+        if any(file_name.lower().endswith(".vob") for file_name in files):
+            add_candidate(discovered, seen, Candidate("vob_dir", current))
             dirs[:] = []
 
 
@@ -185,6 +216,7 @@ def discover_candidates(paths: list[Path]) -> list[Candidate]:
         if direct:
             add_candidate(discovered, seen, direct)
             continue
+
         if not path.is_dir():
             continue
         discover_in_directory(path, discovered, seen)
@@ -199,7 +231,17 @@ def output_path(candidate: Candidate) -> Path:
     if candidate.kind == "bluray_stream":
         root = candidate.path.parent.parent
         return root / f"{root.name}.mkv"
+    if candidate.kind == "dvd_root":
+        return candidate.path / f"{candidate.path.name}.mkv"
+    if candidate.kind == "dvd_video_ts":
+        root = candidate.path.parent
+        return root / f"{root.name}.mkv"
     if candidate.kind == "m2ts_dir":
+        return candidate.path / f"{candidate.path.name}.mkv"
+    if candidate.kind == "vob_dir":
+        if is_video_ts_dir(candidate.path):
+            root = candidate.path.parent
+            return root / f"{root.name}.mkv"
         return candidate.path / f"{candidate.path.name}.mkv"
     if candidate.kind == "mkv":
         return candidate.path
@@ -207,7 +249,19 @@ def output_path(candidate: Candidate) -> Path:
 
 
 def file_duration(path: Path) -> float:
-    result = run_command(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)], capture=True)
+    result = run_command(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture=True,
+    )
     payload = json.loads(result.stdout or "{}")
     duration = payload.get("format", {}).get("duration")
     try:
@@ -228,11 +282,22 @@ def existing_outputs(candidate: Candidate) -> list[Path]:
         search_dir = candidate.path
     elif candidate.kind == "bluray_stream":
         search_dir = candidate.path.parent.parent
+    elif candidate.kind == "dvd_root":
+        search_dir = candidate.path
+    elif candidate.kind == "dvd_video_ts":
+        search_dir = candidate.path.parent
     elif candidate.kind == "m2ts_dir":
         search_dir = candidate.path
+    elif candidate.kind == "vob_dir":
+        search_dir = candidate.path.parent if is_video_ts_dir(candidate.path) else candidate.path
 
     if search_dir is not None:
-        return sorted(path for path in search_dir.glob("*.mkv") if path.is_file() and ".subtitlefix" not in path.name.lower())
+        return sorted(
+            path
+            for path in search_dir.glob("*.mkv")
+            if path.is_file() and ".subtitlefix" not in path.name.lower()
+        )
+
     return []
 
 
@@ -242,7 +307,12 @@ def resolve_existing_output(candidate: Candidate) -> Path | None:
         return None
     if len(candidates) == 1:
         return candidates[0]
-    ranked = sorted(candidates, key=lambda path: (file_duration(path), path.stat().st_size, path.name.lower()), reverse=True)
+
+    ranked = sorted(
+        candidates,
+        key=lambda path: (file_duration(path), path.stat().st_size, path.name.lower()),
+        reverse=True,
+    )
     return ranked[0]
 
 
@@ -250,7 +320,7 @@ def rip_source(candidate: Candidate, *, force: bool = False, cleanup_legacy_titl
     result_path = output_path(candidate)
     if candidate.kind == "mkv":
         return result_path
-    command = [resolve_helper_command("rip-media", "rip_media.py"), "process"]
+    command = [*helper_command("rip-media", "rip_media.py"), "process"]
     if force:
         command.append("--force")
     if cleanup_legacy_titles:
@@ -267,7 +337,10 @@ def rip_source(candidate: Candidate, *, force: bool = False, cleanup_legacy_titl
 
 
 def ffprobe_streams(video_path: Path) -> list[dict]:
-    result = run_command(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(video_path)], capture=True)
+    result = run_command(
+        ["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(video_path)],
+        capture=True,
+    )
     payload = json.loads(result.stdout or "{}")
     return payload.get("streams", [])
 
@@ -279,7 +352,13 @@ def english_internal_tracks(video_path: Path) -> list[dict]:
             continue
         language = normalize_language(stream.get("tags", {}).get("language"))
         if language == "eng":
-            tracks.append({"index": stream["index"], "codec_name": stream.get("codec_name", "unknown"), "language": language})
+            tracks.append(
+                {
+                    "index": stream["index"],
+                    "codec_name": stream.get("codec_name", "unknown"),
+                    "language": language,
+                }
+            )
     return tracks
 
 
@@ -293,7 +372,13 @@ def unknown_internal_tracks(video_path: Path) -> list[dict]:
             continue
         language = normalize_language(stream.get("tags", {}).get("language"))
         if language in UNKNOWN_LANGUAGE_CODES:
-            tracks.append({"index": stream["index"], "codec_name": codec_name, "language": language})
+            tracks.append(
+                {
+                    "index": stream["index"],
+                    "codec_name": codec_name,
+                    "language": language,
+                }
+            )
     return tracks
 
 
@@ -304,9 +389,11 @@ def external_subtitle_candidates(video_path: Path) -> list[Path]:
         if not is_external_subtitle_candidate(video_path, child):
             continue
         candidates.append((external_subtitle_score(video_path, child), child))
+
     if len(candidates) == 1 and candidates[0][0] == 0:
         score, path = candidates[0]
         candidates[0] = (score + 50, path)
+
     candidates.sort(key=lambda item: (-item[0], item[1].name.lower()))
     return [path for _, path in candidates if _ > 0]
 
@@ -347,7 +434,18 @@ def sync_external_subtitle(video_path: Path, subtitle_path: Path, output_path: P
 
 
 def extract_text_subtitle(video_path: Path, stream_index: int, output_path: Path) -> Path:
-    run_command(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video_path), "-map", f"0:{stream_index}", str(output_path)])
+    run_command([
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video_path),
+        "-map",
+        f"0:{stream_index}",
+        str(output_path),
+    ])
     return output_path
 
 
@@ -400,11 +498,13 @@ def looks_like_english_subtitle(subtitle_path: Path) -> bool:
     lines = subtitle_text_lines(subtitle_path)
     if len(lines) < 3:
         return False
+
     sample = " ".join(lines)
     letters = sum(1 for character in sample if character.isalpha())
     ascii_letters = sum(1 for character in sample if character.isascii() and character.isalpha())
     if letters == 0 or ascii_letters / letters < 0.85:
         return False
+
     words = re.findall(r"[A-Za-z']+", sample.lower())
     english_hits = sum(1 for word in words if word in ENGLISH_COMMON_WORDS)
     return english_hits >= 4
@@ -435,6 +535,7 @@ def sync_unknown_english_track(video_path: Path, output_path: Path) -> Path | No
 def ensure_english_subtitle(video_path: Path) -> Path | None:
     final_sidecar = english_sidecar_path(video_path)
     review_marker = review_marker_path(video_path)
+
     external_candidates = external_subtitle_candidates(video_path)
     if external_candidates:
         source_subtitle = external_candidates[0]
@@ -442,6 +543,7 @@ def ensure_english_subtitle(video_path: Path) -> Path | None:
         result = sync_external_subtitle(video_path, source_subtitle, final_sidecar)
         review_marker.unlink(missing_ok=True)
         return result
+
     internal_tracks = english_internal_tracks(video_path)
     if internal_tracks:
         source_track = internal_tracks[0]
@@ -449,12 +551,15 @@ def ensure_english_subtitle(video_path: Path) -> Path | None:
         result = sync_internal_english(video_path, source_track, final_sidecar)
         review_marker.unlink(missing_ok=True)
         return result
+
     detected_english = sync_unknown_english_track(video_path, final_sidecar)
     if detected_english is not None:
         review_marker.unlink(missing_ok=True)
         return detected_english
+
     review_marker.write_text(
-        "No syncable English subtitle was found automatically.\nLook for an English-subtitled release or handle this title manually.\n",
+        "No syncable English subtitle was found automatically.\n"
+        "Look for an English-subtitled release or handle this title manually.\n",
         encoding="utf-8",
     )
     log(f"No English subtitle source found for {video_path}; wrote review marker {review_marker}")
@@ -466,7 +571,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("mode", choices=["process", "scan"], help="Process explicit targets or recursively scan watch folders")
     parser.add_argument("paths", nargs="+", help="Input files or directories to process")
     parser.add_argument("--force", action="store_true", help="Ignore rip markers and reprocess matching sources")
-    parser.add_argument("--cleanup-legacy-titles", action="store_true", help="Remove old MakeMKV-style title outputs like *_t00.mkv after a successful ISO re-rip")
+    parser.add_argument(
+        "--cleanup-legacy-titles",
+        action="store_true",
+        help="Remove old MakeMKV-style title outputs like *_t00.mkv after a successful ISO re-rip",
+    )
     return parser
 
 
@@ -482,9 +591,11 @@ def main() -> int:
             if candidate is None:
                 raise RuntimeError(f"Unsupported input: {path}")
             candidates.append(candidate)
+
     if not candidates:
         log("No candidate media sources found")
         return 0
+
     exit_code = 0
     for candidate in candidates:
         try:
@@ -500,6 +611,7 @@ def main() -> int:
         except Exception as exc:
             exit_code = 1
             log(f"Failed ingest for {candidate.path}: {exc}")
+
     return exit_code
 
 
